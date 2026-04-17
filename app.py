@@ -484,6 +484,19 @@ edited_df = st.data_editor(
     key=f"editor_{n_vars}",
 )
 
+if not isinstance(edited_df, pd.DataFrame):
+    edited_df = pd.DataFrame(edited_df)
+
+edited_df = edited_df.reindex(index=row_labels, columns=col_labels, fill_value="0")
+
+for col in edited_df.columns:
+    edited_df[col] = edited_df[col].map(parse_cell_value)
+
+edited_df.index = row_labels
+edited_df.columns = col_labels
+
+st.session_state[state_key] = edited_df
+
 edited_df = edited_df.applymap(parse_cell_value)
 st.session_state[state_key] = edited_df
 
