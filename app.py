@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from itertools import combinations
-from typing import List, Tuple, Set, Dict
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
 from sympy import symbols
 from sympy.logic.boolalg import SOPform
-
 
 st.set_page_config(page_title="Universal Karnaugh Map Solver", layout="wide")
 
@@ -22,7 +20,7 @@ st.set_page_config(page_title="Universal Karnaugh Map Solver", layout="wide")
 class Group:
     cells: frozenset[tuple[int, int]]
     minterms: frozenset[int]
-    term_bits: tuple[int | None, ...]  # None means eliminated variable
+    term_bits: tuple[Optional[int], ...]  # None = eliminated variable
 
 
 # ============================================================
@@ -77,12 +75,8 @@ def binary_str_to_int(bits: str) -> int:
     return int(bits, 2) if bits else 0
 
 
-def cell_bits(row_gray: str, col_gray: str) -> str:
-    return row_gray + col_gray
-
-
 def minterm_from_cell(row_gray: str, col_gray: str) -> int:
-    return binary_str_to_int(cell_bits(row_gray, col_gray))
+    return binary_str_to_int(row_gray + col_gray)
 
 
 def format_expr_pretty(expr) -> str:
@@ -98,16 +92,36 @@ def format_expr_pretty(expr) -> str:
     return text
 
 
+def normalize_editor_output(
+    edited_obj,
+    row_labels: list[str],
+    col_labels: list[str],
+) -> pd.DataFrame:
+    if isinstance(edited_obj, pd.DataFrame):
+        df = edited_obj.copy()
+    else:
+        df = pd.DataFrame(edited_obj)
+
+    df = df.reindex(index=row_labels, columns=col_labels, fill_value="0")
+
+    for col in df.columns:
+        df[col] = df[col].map(parse_cell_value)
+
+    df.index = row_labels
+    df.columns = col_labels
+    return df
+
+
 # ============================================================
 # Boolean / grouping logic
 # ============================================================
 
-def pattern_from_bits(bits: str, n_vars: int) -> tuple[int | None, ...]:
-    return tuple(int(b) for b in bits[:n_vars])
-
-
-def merge_patterns(a: tuple[int | None, ...], b: tuple[int | None, ...]) -> tuple[int | None, ...] | None:
+def merge_patterns(
+    a: tuple[Optional[int], ...],
+    b: tuple[Optional[int], ...],
+) -> Optional[tuple[Optional[int], ...]]:
     diff_positions = []
+
     for i, (x, y) in enumerate(zip(a, b)):
         if x != y:
             if x is None or y is None:
@@ -123,10 +137,17 @@ def merge_patterns(a: tuple[int | None, ...], b: tuple[int | None, ...]) -> tupl
     return tuple(merged)
 
 
-def qm_prime_implicants(minterms: list[int], dontcares: list[int], n_vars: int) -> list[tuple[tuple[int | None, ...], frozenset[int]]]:
+def qm_prime_implicants(
+    minterms: list[int],
+    dontcares: list[int],
+    n_vars: int,
+) -> list[tuple[tuple[Optional[int], ...], frozenset[int]]]:
     initial_terms = sorted(set(minterms) | set(dontcares))
-    current = [(tuple(int(b) for b in f"{m:0{n_vars}b}"), frozenset([m])) for m in initial_terms]
-    prime_implicants: set[tuple[tuple[int | None, ...], frozenset[int]]] = set()
+    current = [
+        (tuple(int(b) for b in f"{m:0{n_vars}b}"), frozenset([m]))
+        for m in initial_terms
+    ]
+    prime_implicants: set[tuple[tuple[Optional[int], ...], frozenset[int]]] = set()
 
     while True:
         used = set()
@@ -149,50 +170,35 @@ def qm_prime_implicants(minterms: list[int], dontcares: list[int], n_vars: int) 
         if not next_round:
             break
 
-        # deduplicate by pattern + covered set
         current = sorted(next_round, key=lambda x: (str(x[0]), sorted(x[1])))
 
-    # Keep only implicants that cover at least one real minterm
-    filtered = []
     minterm_set = set(minterms)
+    filtered = []
     for pattern, covered in prime_implicants:
         real_covered = frozenset(m for m in covered if m in minterm_set)
         if real_covered:
             filtered.append((pattern, real_covered))
 
-    # Remove duplicates by pattern keeping union of coverage
-    merged_map: dict[tuple[int | None, ...], set[int]] = {}
+    merged_map: dict[tuple[Optional[int], ...], set[int]] = {}
     for pattern, covered in filtered:
         merged_map.setdefault(pattern, set()).update(covered)
 
     return [(pattern, frozenset(sorted(cov))) for pattern, cov in merged_map.items()]
 
 
-def pattern_covers_minterm(pattern: tuple[int | None, ...], m: int, n_vars: int) -> bool:
-    bits = f"{m:0{n_vars}b}"
-    for p, b in zip(pattern, bits):
-        if p is None:
-            continue
-        if int(b) != p:
-            return False
-    return True
-
-
 def find_essential_and_cover(
-    prime_implicants: list[tuple[tuple[int | None, ...], frozenset[int]]],
+    prime_implicants: list[tuple[tuple[Optional[int], ...], frozenset[int]]],
     minterms: list[int],
-    n_vars: int,
-) -> list[tuple[tuple[int | None, ...], frozenset[int]]]:
+) -> list[tuple[tuple[Optional[int], ...], frozenset[int]]]:
     minterm_set = set(minterms)
 
     coverage: dict[int, list[int]] = {m: [] for m in minterms}
-    for idx, (pattern, covered) in enumerate(prime_implicants):
+    for idx, (_, covered) in enumerate(prime_implicants):
         for m in covered:
             coverage[m].append(idx)
 
     selected_indices: set[int] = set()
 
-    # Essential prime implicants
     for m, idxs in coverage.items():
         if len(idxs) == 1:
             selected_indices.add(idxs[0])
@@ -207,7 +213,6 @@ def find_essential_and_cover(
 
     candidate_indices = [i for i in range(len(prime_implicants)) if i not in selected_indices]
 
-    # Brute force is fine here (<= 8 vars / teaching usage)
     best_combo = None
     best_score = None
 
@@ -243,7 +248,7 @@ def find_essential_and_cover(
     return [prime_implicants[i] for i in sorted(final_indices)]
 
 
-def pattern_to_term(pattern: tuple[int | None, ...], var_names: list[str]) -> str:
+def pattern_to_term(pattern: tuple[Optional[int], ...], var_names: list[str]) -> str:
     parts = []
     for bit, var in zip(pattern, var_names):
         if bit is None:
@@ -253,7 +258,7 @@ def pattern_to_term(pattern: tuple[int | None, ...], var_names: list[str]) -> st
 
 
 def group_cells_from_pattern(
-    pattern: tuple[int | None, ...],
+    pattern: tuple[Optional[int], ...],
     row_labels: list[str],
     col_labels: list[str],
 ) -> set[tuple[int, int]]:
@@ -274,7 +279,7 @@ def group_cells_from_pattern(
 
 
 def build_solution_groups(
-    selected_implicants: list[tuple[tuple[int | None, ...], frozenset[int]]],
+    selected_implicants: list[tuple[tuple[Optional[int], ...], frozenset[int]]],
     row_labels: list[str],
     col_labels: list[str],
 ) -> list[Group]:
@@ -306,6 +311,7 @@ def solve_kmap(
         for c, col_g in enumerate(col_labels):
             val = parse_cell_value(grid_df.iat[r, c])
             m = minterm_from_cell(row_g, col_g)
+
             cell_info.append(
                 {
                     "row_gray": row_g,
@@ -314,6 +320,7 @@ def solve_kmap(
                     "minterm": m,
                 }
             )
+
             if val == "1":
                 minterms.append(m)
             elif val == "X":
@@ -325,8 +332,19 @@ def solve_kmap(
     vars_sym = symbols(var_names)
     sympy_expr = SOPform(vars_sym, minterms, dontcares)
 
+    if not minterms:
+        return {
+            "minterms": minterms,
+            "dontcares": dontcares,
+            "sympy_expr": sympy_expr,
+            "groups": [],
+            "cell_info": cell_info,
+            "prime_implicants": [],
+            "selected_implicants": [],
+        }
+
     prime_implicants = qm_prime_implicants(minterms, dontcares, n_vars)
-    selected_implicants = find_essential_and_cover(prime_implicants, minterms, n_vars)
+    selected_implicants = find_essential_and_cover(prime_implicants, minterms)
     groups = build_solution_groups(selected_implicants, row_labels, col_labels)
 
     return {
@@ -353,10 +371,7 @@ GROUP_COLORS = [
 def render_highlighted_kmap(
     grid_df: pd.DataFrame,
     groups: list[Group],
-    row_labels: list[str],
-    col_labels: list[str],
-    var_names: list[str],
-) -> pd.io.formats.style.Styler:
+):
     cell_to_groups: dict[tuple[int, int], list[int]] = {}
     for i, grp in enumerate(groups):
         for cell in grp.cells:
@@ -386,7 +401,9 @@ def render_highlighted_kmap(
                     base.append("border: 2px solid #333")
                 else:
                     color = "#FFF59D"
-                    base.append(f"background: repeating-linear-gradient(45deg, {color}, {color} 8px, white 8px, white 16px)")
+                    base.append(
+                        f"background: repeating-linear-gradient(45deg, {color}, {color} 8px, white 8px, white 16px)"
+                    )
                     base.append("border: 2px solid #333")
 
                 styles.iat[r, c] = "; ".join(base)
@@ -477,27 +494,14 @@ if state_key not in st.session_state:
 df_current = st.session_state[state_key].copy()
 
 st.subheader("Fill the Karnaugh map")
-edited_df = st.data_editor(
+edited_obj = st.data_editor(
     df_current,
     width="stretch",
     num_rows="fixed",
     key=f"editor_{n_vars}",
 )
 
-if not isinstance(edited_df, pd.DataFrame):
-    edited_df = pd.DataFrame(edited_df)
-
-edited_df = edited_df.reindex(index=row_labels, columns=col_labels, fill_value="0")
-
-for col in edited_df.columns:
-    edited_df[col] = edited_df[col].map(parse_cell_value)
-
-edited_df.index = row_labels
-edited_df.columns = col_labels
-
-st.session_state[state_key] = edited_df
-
-edited_df = edited_df.applymap(parse_cell_value)
+edited_df = normalize_editor_output(edited_obj, row_labels, col_labels)
 st.session_state[state_key] = edited_df
 
 a, b, c, d = st.columns(4)
@@ -565,7 +569,7 @@ if st.button("Solve Karnaugh Map", width="stretch"):
     st.write(f"**SymPy simplified form:** {format_expr_pretty(result['sympy_expr'])}")
 
     st.subheader("Highlighted grouping")
-    styled_map = render_highlighted_kmap(edited_df, groups, row_labels, col_labels, var_names)
+    styled_map = render_highlighted_kmap(edited_df, groups)
     st.dataframe(styled_map, width="stretch")
 
     st.subheader("Groups used in the solution")
